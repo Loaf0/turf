@@ -10,9 +10,7 @@ use winapi::um::winnt::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 use winapi::um::winnt::PROCESS_VM_WRITE;
 use std::mem::MaybeUninit;
 use winapi::um::winnt::PROCESS_VM_OPERATION;
-use crate::mem;
 use winapi::um::winnt::{MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS, MEMORY_BASIC_INFORMATION};
-
 
 pub struct Process {
     pid: u32,
@@ -30,6 +28,85 @@ impl Process {
         })
         .map(|handle| Self { pid, handle })
         .ok_or_else(io::Error::last_os_error)
+    }
+
+    /// Try to open a process with the minimal flags required for querying its name.
+    pub fn open_for_query(pid: u32) -> io::Result<*mut c_void> {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid) };
+        if handle.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(handle)
+        }
+    }
+
+    /// Get the friendly process name for the given pid
+    pub fn get_process_name(pid: u32) -> io::Result<String> {
+        // SAFETY: open and close handle locally
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut module = MaybeUninit::<HMODULE>::uninit();
+        let mut size = 0u32;
+        let res = unsafe {
+            winapi::um::psapi::EnumProcessModules(
+                handle,
+                module.as_mut_ptr(),
+                std::mem::size_of::<HMODULE>() as u32,
+                &mut size,
+            )
+        };
+
+        if res == FALSE {
+            unsafe { CloseHandle(handle); }
+            return Err(io::Error::last_os_error());
+        }
+
+        let module = unsafe { module.assume_init() };
+        let mut buffer = Vec::<u8>::with_capacity(260);
+        let length = unsafe {
+            winapi::um::psapi::GetModuleBaseNameA(
+                handle,
+                module,
+                buffer.as_mut_ptr().cast(),
+                buffer.capacity() as u32,
+            )
+        };
+
+        if length == 0 {
+            unsafe { CloseHandle(handle); }
+            return Err(io::Error::last_os_error());
+        }
+
+        unsafe { buffer.set_len(length as usize) };
+        let name = String::from_utf8_lossy(&buffer).into_owned();
+        unsafe { CloseHandle(handle); }
+        Ok(name)
+    }
+
+    /// Return a list of (pid, name) for currently running processes
+    pub fn list_processes() -> io::Result<Vec<(u32, String)>> {
+        // use EnumProcesses
+        let mut arr = vec![0u32; 4096];
+        let mut bytes_returned: u32 = 0;
+        let ok = unsafe {
+            winapi::um::psapi::EnumProcesses(arr.as_mut_ptr(), (arr.len() * std::mem::size_of::<u32>()) as u32, &mut bytes_returned)
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let count = (bytes_returned as usize) / std::mem::size_of::<u32>();
+        arr.truncate(count);
+        let mut out = Vec::new();
+        for pid in arr.into_iter() {
+            if pid == 0 { continue; }
+            if let Ok(name) = Process::get_process_name(pid) {
+                out.push((pid, name));
+            }
+        }
+        Ok(out)
     }
 
     pub fn read_memory(&self, addr: usize, n: usize) -> io::Result<Vec<u8>> {

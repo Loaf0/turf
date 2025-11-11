@@ -3,6 +3,9 @@ name = "Turf"
 version = "0.1.0"
 edition = "2024"
 
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-L", "native=G:/Coding Projects/Rust/libs/npcapsdk/x64"]
+
 [dependencies]
 eframe = "0.31.1"
 pnet = "0.35.0"
